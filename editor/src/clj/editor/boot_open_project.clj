@@ -423,6 +423,7 @@
           (let [auto-pulls [[app-view :refresh-tab-panes]
                             [asset-browser :tree-view]
                             [curve-view :update-list-view]
+                            [debug-view :update-tool-bar-tooltips]
                             [debug-view :update-available-controls]
                             [debug-view :update-call-stack]
                             [breakpoints-view :breakpoints-anchor-pane]]]

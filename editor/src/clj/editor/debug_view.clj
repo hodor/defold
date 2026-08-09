@@ -34,6 +34,7 @@
             [editor.engine :as engine]
             [editor.fxui :as fxui]
             [editor.handler :as handler]
+            [editor.keymap :as keymap]
             [editor.localization :as localization]
             [editor.lua :as lua]
             [editor.notifications :as notifications]
@@ -65,6 +66,21 @@
 
 (defn- single [coll]
   (when (nil? (next coll)) (first coll)))
+
+(defn- command-tooltip [label command keymap]
+  (localization/message "command.tooltip"
+                        {"command" label
+                         "shortcut" (keymap/display-text keymap command "none")}))
+
+(g/defnk update-tool-bar-tooltips!
+  [^Parent console-grid-pane keymap localization]
+  (ui/with-controls console-grid-pane [pause-debugger-button play-debugger-button step-in-debugger-button step-out-debugger-button step-over-debugger-button stop-debugger-button]
+    (ui/tooltip! pause-debugger-button (command-tooltip break-label :debugger.break keymap) localization)
+    (ui/tooltip! play-debugger-button (command-tooltip continue-label :debugger.continue keymap) localization)
+    (ui/tooltip! step-in-debugger-button (command-tooltip step-into-label :debugger.step-into keymap) localization)
+    (ui/tooltip! step-out-debugger-button (command-tooltip step-out-label :debugger.step-out keymap) localization)
+    (ui/tooltip! step-over-debugger-button (command-tooltip step-over-label :debugger.step-over keymap) localization)
+    (ui/tooltip! stop-debugger-button (command-tooltip stop-debugger-label :debugger.stop keymap) localization)))
 
 (g/defnk update-available-controls!
   [^Parent console-grid-pane debug-session suspension-state]
@@ -198,6 +214,9 @@
   (property evaluation-history-index g/Int)
   (property evaluation-stashed-entry-text g/Str)
 
+  (input keymap g/Any)
+
+  (output update-tool-bar-tooltips g/Any :cached update-tool-bar-tooltips!)
   (output update-available-controls g/Any :cached update-available-controls!)
   (output update-call-stack g/Any :cached update-call-stack!)
   (output execution-locations g/Any :cached produce-execution-locations)
@@ -249,17 +268,11 @@
             (console/append-console-entry! :eval-error (str ret))))))))
 
 (defn- setup-tool-bar!
-  [^Parent console-tool-bar localization]
+  [^Parent console-tool-bar]
   (ui/with-controls console-tool-bar [^Parent debugger-tool-bar ^Button pause-debugger-button ^Button play-debugger-button step-in-debugger-button step-out-debugger-button step-over-debugger-button stop-debugger-button]
     (.bind (.managedProperty debugger-tool-bar) (.visibleProperty debugger-tool-bar))
     (.bind (.managedProperty pause-debugger-button) (.visibleProperty pause-debugger-button))
     (.bind (.managedProperty play-debugger-button) (.visibleProperty play-debugger-button))
-    (ui/tooltip! pause-debugger-button break-label localization)
-    (ui/tooltip! play-debugger-button continue-label localization)
-    (ui/tooltip! step-in-debugger-button step-into-label localization)
-    (ui/tooltip! step-out-debugger-button step-out-label localization)
-    (ui/tooltip! step-over-debugger-button step-over-label localization)
-    (ui/tooltip! stop-debugger-button stop-debugger-label localization)
     (ui/bind-action! pause-debugger-button :debugger.break)
     (ui/bind-action! play-debugger-button :debugger.continue)
     (ui/bind-action! step-in-debugger-button :debugger.step-into)
@@ -354,12 +367,12 @@
                        nil))))
 
 (defn- setup-controls!
-  [debug-view ^Parent console-grid-pane ^ListView call-stack-view ^TreeView variables-view localization]
+  [debug-view ^Parent console-grid-pane ^ListView call-stack-view ^TreeView variables-view]
   (ui/with-controls console-grid-pane [console-tool-bar
                                        ^Parent debugger-prompt
                                        debugger-prompt-field]
     ;; tool bar
-    (setup-tool-bar! console-tool-bar localization)
+    (setup-tool-bar! console-tool-bar)
 
     ;; debugger prompt
     (.bind (.managedProperty debugger-prompt) (.visibleProperty debugger-prompt))
@@ -448,7 +461,8 @@
 (defn- setup-view! [debug-view app-view]
   (g/transact
     {:undoable false}
-    [(g/connect debug-view :execution-locations app-view :debugger-execution-locations)
+    [(g/connect app-view :keymap debug-view :keymap)
+     (g/connect debug-view :execution-locations app-view :debugger-execution-locations)
      (g/connect debug-view :suspension-variables app-view :debugger-suspension-variables)
      (g/connect debug-view :debugger-sidebar-panes app-view :debugger-sidebar-panes)])
   debug-view)
@@ -472,7 +486,7 @@
                                    :state-changed-fn state-changed-fn))))
         view-id (setup-view! view-id app-view)
         timer (make-update-timer project view-id)]
-    (setup-controls! view-id console-grid-pane call-stack-view variables-view localization)
+    (setup-controls! view-id console-grid-pane call-stack-view variables-view)
     (ui/timer-start! timer)
     view-id))
 
