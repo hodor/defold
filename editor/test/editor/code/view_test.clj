@@ -19,12 +19,21 @@
 
 (set! *warn-on-reflection* true)
 
-(defn- completion-context [line trigger-characters]
-  (let [cursor (data/->Cursor 0 (count line))]
-    (view/produce-completion-context
-      {:lines [line]
-       :cursor-ranges [(data/Cursor->CursorRange cursor)]
-       :completion-trigger-characters trigger-characters})))
+(def ^:private anim-grammar
+  {:string-argument-completion-patterns
+   [{:pattern #"sprite\.play_flipbook\s*\(\s*[\"']#([a-zA-Z0-9_-]+)[\"']\s*,\s*[\"']([a-zA-Z0-9_-]*)$"
+     :context-format "#anim:%s"}]})
+
+(defn- completion-context
+  ([line trigger-characters]
+   (completion-context line trigger-characters nil))
+  ([line trigger-characters grammar]
+   (let [cursor (data/->Cursor 0 (count line))]
+     (view/produce-completion-context
+       {:lines [line]
+        :cursor-ranges [(data/Cursor->CursorRange cursor)]
+        :completion-trigger-characters trigger-characters
+        :grammar grammar}))))
 
 (deftest produce-completion-context-test
   (testing "dotted prefix"
@@ -57,4 +66,12 @@
   (testing "hash context requires the hash trigger character"
     (let [context (completion-context "msg.post(\"#play_s" #{"."})]
       (is (= "" (:context context)))
-      (is (= "play_s" (:query context))))))
+      (is (= "play_s" (:query context)))))
+  (testing "animation argument produces a component-scoped context"
+    (let [context (completion-context "sprite.play_flipbook(\"#hero\", \"ru" #{"." "#"} anim-grammar)]
+      (is (= "#anim:hero" (:context context)))
+      (is (= "ru" (:query context)))))
+  (testing "animation argument matches without a space after the comma"
+    (let [context (completion-context "sprite.play_flipbook('#hero','" #{"." "#"} anim-grammar)]
+      (is (= "#anim:hero" (:context context)))
+      (is (= "" (:query context))))))

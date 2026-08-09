@@ -930,19 +930,24 @@
                        complete LSP completion list should be refreshed
     :trigger           single-character trigger string before cursor (\"\\n\" on
                        the start of the line, even it's the first one)"
-  [lines cursor-ranges completion-trigger-characters]
+  [lines cursor-ranges completion-trigger-characters grammar]
   {:pre [(pos? (count cursor-ranges))]}
   (let [hash-context (contains? completion-trigger-characters "#")
+        arg-patterns (:string-argument-completion-patterns grammar)
         results (mapv (fn [^CursorRange cursor-range]
                         (let [suggestion-cursor (data/adjust-cursor lines (data/cursor-range-start cursor-range))
                               line (subs (lines (.-row suggestion-cursor)) 0 (.-col suggestion-cursor))
-                              [context query] (if-let [hash-query (when hash-context
-                                                                    (second (re-find #"[\"']#([a-zA-Z0-9_-]*)$" line)))]
-                                                ["#" hash-query]
-                                                (let [prefix (or (re-find #"[a-zA-Z_][a-zA-Z_0-9.]*$" line) "")
-                                                      last-dot (string/last-index-of prefix ".")]
-                                                  [(if last-dot (subs prefix 0 last-dot) "")
-                                                   (if last-dot (subs prefix (inc ^long last-dot)) prefix)]))
+                              [context query] (or (some (fn [{:keys [pattern context-format]}]
+                                                          (when-let [[_ group query] (re-find pattern line)]
+                                                            [(format context-format group) query]))
+                                                        arg-patterns)
+                                                  (if-let [hash-query (when hash-context
+                                                                        (second (re-find #"[\"']#([a-zA-Z0-9_-]*)$" line)))]
+                                                    ["#" hash-query]
+                                                    (let [prefix (or (re-find #"[a-zA-Z_][a-zA-Z_0-9.]*$" line) "")
+                                                          last-dot (string/last-index-of prefix ".")]
+                                                      [(if last-dot (subs prefix 0 last-dot) "")
+                                                       (if last-dot (subs prefix (inc ^long last-dot)) prefix)])))
                               affected-cursor (if (pos? (data/compare-cursor-position
                                                           (.-from cursor-range)
                                                           (.-to cursor-range)))
@@ -1882,8 +1887,8 @@
      (boolean (and (not (contains? #{"\n" "\t" " "} trigger))
                    (or (re-matches #"[a-zA-Z_]" trigger)
                        (contains? trigger-characters trigger)
-                       ;; component ids may contain digits and hyphens
-                       (and (= "#" context) (re-matches #"[0-9-]" trigger)))
+                       ;; component and animation ids may contain digits and hyphens
+                       (and (string/starts-with? context "#") (re-matches #"[0-9-]" trigger)))
                    ;; "#" only triggers completions at the start of a quoted
                    ;; string, where the completion context recognizes it as a
                    ;; component id position; elsewhere it's the Lua length
