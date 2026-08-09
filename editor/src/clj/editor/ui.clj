@@ -2365,18 +2365,24 @@
              :visible toolbar-visible}}))
 
 (defn- refresh-toolbar [td toolbar-visible command-contexts localization evaluation-context]
-  (let [^HBox control (:control td)]
-    (when (.getScene control)
-      (let [items
+  (let [^HBox control (:control td)
+        scene (.getScene control)]
+    (when scene
+      (let [keymap (or (user-data scene :keymap) keymap/empty)
+            items
             (transduce
               (keep
-                (fn [{:keys [command user-data label] :as menu-item}]
+                (fn [{:keys [command user-data label tooltip] :as menu-item}]
                   (if (= :separator label)
                     {:type :separator}
                     (when-let [handler-ctx (handler/active command command-contexts user-data evaluation-context)]
                       (assoc menu-item
                              :type :item
                              :label (or (handler/label handler-ctx evaluation-context) label)
+                             :tooltip (when tooltip
+                                        (localization/message "command.tooltip"
+                                                              {"command" tooltip
+                                                               "shortcut" (keymap/display-text keymap command "none")}))
                              :enabled (handler/enabled? handler-ctx evaluation-context)
                              :options (handler/options handler-ctx evaluation-context)
                              :state (handler/state handler-ctx evaluation-context))))))
