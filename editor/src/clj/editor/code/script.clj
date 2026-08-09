@@ -140,6 +140,13 @@
                                 \] "punctuation.definition.string.end.lua"}}
    :completion-trigger-characters #{"." "#"}
    :ignored-completion-trigger-characters #{"{" ","}
+   ;; When the text before the cursor matches a pattern, the completion context
+   ;; becomes the pattern's context formatted with capture group 1 and the
+   ;; completion query becomes capture group 2. Used to complete animation ids
+   ;; of the component addressed by a play-animation call's url argument.
+   :string-argument-completion-patterns
+   [{:pattern #"sprite\.play_flipbook\s*\(\s*[\"']#([a-zA-Z0-9_-]+)[\"']\s*,\s*[\"']([a-zA-Z0-9_-]*)$"
+     :context-format "#anim:%s"}]
    :patterns [{:captures {1 {:name "keyword.control.lua"}
                           2 {:name "entity.name.function.scope.lua"}
                           3 {:name "entity.name.function.lua"}
@@ -495,6 +502,37 @@
                                   :detail (string/join ", " owner-proj-paths)))
           component-id->owner-proj-paths)))
 
+(defn- component-source-resource-node-id
+  "The resource node backing a component node, e.g. the .sprite node behind a
+  sprite component"
+  [basis component-node-id]
+  (some (fn [arc]
+          (let [source-id (gt/source-id arc)]
+            (when (g/node-instance? basis resource/ResourceNode source-id)
+              source-id)))
+        (g/explicit-arcs-by-target basis component-node-id :source-build-targets)))
+
+(defn- animation-id-completions
+  "A map from \"#anim:<component-id>\" to completions for the animation ids of
+  that component, for every component of the game objects using this script
+  whose resource type exposes animation ids"
+  [evaluation-context script-node-id]
+  (let [basis (:basis evaluation-context)
+        game-object-node-ids (owning-game-object-ids basis script-node-id 1)]
+    (into {}
+          (comp
+            (mapcat #(g/node-value % :component-ids evaluation-context))
+            (keep
+              (fn [[component-id component-node-id]]
+                (when-let [source-id (component-source-resource-node-id basis component-node-id)]
+                  (when (g/has-output? (g/node-type* basis source-id) :anim-ids)
+                    (let [anim-ids (g/node-value source-id :anim-ids evaluation-context)]
+                      (when (and (not (g/error-value? anim-ids))
+                                 (seq anim-ids))
+                        (pair (str "#anim:" component-id)
+                              (mapv #(code-completion/make % :type :property) anim-ids)))))))))
+          game-object-node-ids)))
+
 (g/defnode LuaCodeNode
   (inherits r/CodeEditorResourceNode)
 
@@ -512,8 +550,9 @@
   ;; current graph state. Scripts that are not components of a game object
   ;; contribute no "#" completions.
   (output completions g/Any (g/fnk [^:unsafe _evaluation-context _node-id script-intelligence-completions]
-                              (assoc script-intelligence-completions
-                                     "#" (component-id-completions _evaluation-context _node-id))))
+                              (merge script-intelligence-completions
+                                     {"#" (component-id-completions _evaluation-context _node-id)}
+                                     (animation-id-completions _evaluation-context _node-id))))
   (output resource-with-lines script-annotations/ResourceWithLines (g/fnk [resource lines :as ret] ret)))
 
 (g/defnode LuaNode

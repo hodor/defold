@@ -31,6 +31,10 @@
             completions (get (g/node-value gui-script-node :completions) "#")]
         (is (= ["camera" "gui" "script" "session_proxy"] (mapv :name completions)))
         (is (every? #(= "/logic/main.go" (:detail %)) completions))))
+    (testing "animation ids of a sprite component are completed by its play call"
+      (let [ball-script (test-util/resource-node project "/logic/session/ball.script")
+            completions (g/node-value ball-script :completions)]
+        (is (= ["test"] (mapv :name (get completions "#anim:sprite"))))))
     (testing "component ids follow graph changes"
       (let [script-node (test-util/resource-node project "/logic/main.script")
             go-node (test-util/resource-node project "/logic/main.go")
