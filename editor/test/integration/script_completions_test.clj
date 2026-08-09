@@ -26,6 +26,11 @@
             completions (get (g/node-value script-node :completions) "#")]
         (is (= ["camera" "gui" "script" "session_proxy"] (mapv :name completions)))
         (is (every? #(= "/logic/main.go" (:detail %)) completions))))
+    (testing "gui script completes the component ids of the hosting game object"
+      (let [gui-script-node (test-util/resource-node project "/logic/main.gui_script")
+            completions (get (g/node-value gui-script-node :completions) "#")]
+        (is (= ["camera" "gui" "script" "session_proxy"] (mapv :name completions)))
+        (is (every? #(= "/logic/main.go" (:detail %)) completions))))
     (testing "component ids follow graph changes"
       (let [script-node (test-util/resource-node project "/logic/main.script")
             go-node (test-util/resource-node project "/logic/main.go")

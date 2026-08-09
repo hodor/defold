@@ -425,26 +425,6 @@
     (filter data/breakpoint-region?)
     (map (partial region->breakpoint resource))))
 
-(g/defnode LuaCodeNode
-  (inherits r/CodeEditorResourceNode)
-
-  (input lua-preprocessors g/Any)
-  (input script-intelligence-completions script-intelligence/ScriptCompletions)
-
-  ;; Breakpoints output only consumed by project (array input of all code files)
-  ;; and already cached there. Changing breakpoints and pulling project breakpoints
-  ;; does imply a pass over all code nodes to produce new breakpoints, but does
-  ;; not seem to be much of a perf issue.
-  (output breakpoints project/Breakpoints produce-breakpoints)
-
-  (output completions g/Any :cached (gu/passthrough script-intelligence-completions))
-  (output resource-with-lines script-annotations/ResourceWithLines (g/fnk [resource lines :as ret] ret)))
-
-(g/defnode LuaNode
-  (inherits LuaCodeNode)
-
-  (output build-targets g/Any :cached produce-lua-build-targets))
-
 (defn- owning-game-object-id
   "Returns the node id of the game object that owns a node, or nil"
   [basis node-id]
@@ -454,23 +434,43 @@
         node-id
         (recur (core/owner-node-id basis node-id))))))
 
+(defn- referencing-node-ids
+  "Node ids of the nodes that consume outputs of a node or its overrides"
+  [basis node-id]
+  (into []
+        (comp
+          (coll/tree-xf any? #(g/overrides basis %))
+          (mapcat #(g/explicit-arcs-by-source basis %))
+          (map gt/target-id))
+        [node-id]))
+
+(defn- owning-game-object-ids
+  "Game object node ids whose components reference a node
+
+  A referencing resource node without an owning game object is followed
+  through resource-hops more referencing levels; one level finds the game
+  objects hosting a gui component when the node is a gui script."
+  [basis node-id ^long resource-hops]
+  (into #{}
+        (mapcat
+          (fn [target-id]
+            (if-let [game-object-node-id (owning-game-object-id basis target-id)]
+              [(g/override-root basis game-object-node-id)]
+              (when (and (pos? resource-hops)
+                         (g/node-instance? basis resource/ResourceNode target-id))
+                (owning-game-object-ids basis target-id (dec resource-hops))))))
+        (referencing-node-ids basis node-id)))
+
 (defn- component-id-completions
   "Completions for the component ids of the game objects using this script
 
   The game objects are found by walking the graph arcs from the script node to
   the components that reference it, the same way the Show References dialog
-  finds referencing resources."
+  finds referencing resources. For gui scripts the walk passes through the gui
+  scene to the game objects hosting it as a component."
   [evaluation-context script-node-id]
   (let [basis (:basis evaluation-context)
-        game-object-node-ids
-        (into #{}
-              (comp
-                (coll/tree-xf any? #(g/overrides basis %))
-                (mapcat #(g/explicit-arcs-by-source basis %))
-                (map gt/target-id)
-                (keep #(owning-game-object-id basis %))
-                (map #(g/override-root basis %)))
-              [script-node-id])
+        game-object-node-ids (owning-game-object-ids basis script-node-id 1)
         component-id->owner-proj-paths
         (reduce
           (fn [acc [component-id owner-proj-path]]
@@ -494,6 +494,32 @@
                                   :type :property
                                   :detail (string/join ", " owner-proj-paths)))
           component-id->owner-proj-paths)))
+
+(g/defnode LuaCodeNode
+  (inherits r/CodeEditorResourceNode)
+
+  (input lua-preprocessors g/Any)
+  (input script-intelligence-completions script-intelligence/ScriptCompletions)
+
+  ;; Breakpoints output only consumed by project (array input of all code files)
+  ;; and already cached there. Changing breakpoints and pulling project breakpoints
+  ;; does imply a pass over all code nodes to produce new breakpoints, but does
+  ;; not seem to be much of a perf issue.
+  (output breakpoints project/Breakpoints produce-breakpoints)
+
+  ;; The "#" completions are found by walking graph arcs, which the dependency
+  ;; system cannot track; this output is uncached so every pull reads the
+  ;; current graph state. Scripts that are not components of a game object
+  ;; contribute no "#" completions.
+  (output completions g/Any (g/fnk [^:unsafe _evaluation-context _node-id script-intelligence-completions]
+                              (assoc script-intelligence-completions
+                                     "#" (component-id-completions _evaluation-context _node-id))))
+  (output resource-with-lines script-annotations/ResourceWithLines (g/fnk [resource lines :as ret] ret)))
+
+(g/defnode LuaNode
+  (inherits LuaCodeNode)
+
+  (output build-targets g/Any :cached produce-lua-build-targets))
 
 (g/defnode ScriptNode
   (inherits LuaCodeNode)
@@ -537,12 +563,6 @@
 
   (output _properties g/Properties :cached produce-properties)
   (output build-targets g/Any :cached produce-script-build-targets)
-  ;; The "#" completions are found by walking graph arcs, which the dependency
-  ;; system cannot track; this output is uncached so every pull reads the
-  ;; current graph state.
-  (output completions g/Any (g/fnk [^:unsafe _evaluation-context _node-id script-intelligence-completions]
-                              (assoc script-intelligence-completions
-                                     "#" (component-id-completions _evaluation-context _node-id))))
   (output resource-property-build-targets g/Any (gu/passthrough resource-property-build-targets))
   (output script-property-entries ScriptPropertyEntries (g/fnk [script-property-entries] (reduce into {} script-property-entries)))
   (output script-property-node-ids-by-name NameNodeIDMap (g/fnk [script-property-name+node-ids] (into {} script-property-name+node-ids))))
