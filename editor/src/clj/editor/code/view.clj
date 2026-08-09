@@ -928,6 +928,7 @@
   [lines cursor-ranges completion-trigger-characters grammar]
   {:pre [(pos? (count cursor-ranges))]}
   (let [hash-context (contains? completion-trigger-characters "#")
+        url-context (contains? completion-trigger-characters "/")
         arg-patterns (:string-argument-completion-patterns grammar)
         results (mapv (fn [^CursorRange cursor-range]
                         (let [suggestion-cursor (data/adjust-cursor lines (data/cursor-range-start cursor-range))
@@ -936,6 +937,12 @@
                                                           (when-let [[_ group query] (re-find pattern line)]
                                                             [(format context-format group) query]))
                                                         arg-patterns)
+                                                  ;; A string literal beginning with "/" is a game
+                                                  ;; object url; the whole path (including any "#")
+                                                  ;; is the query for the "url" completions.
+                                                  (when-let [url-query (when url-context
+                                                                         (second (re-find #"[\"'](/[a-zA-Z0-9_/#.-]*)$" line)))]
+                                                    ["url" url-query])
                                                   (if-let [hash-query (when hash-context
                                                                         (second (re-find #"[\"']#([a-zA-Z0-9_-]*)$" line)))]
                                                     ["#" hash-query]
@@ -1873,13 +1880,18 @@
      (boolean (and (not (contains? #{"\n" "\t" " "} trigger))
                    (or (re-matches #"[a-zA-Z_]" trigger)
                        (contains? trigger-characters trigger)
-                       ;; component and animation ids may contain digits and hyphens
-                       (and (string/starts-with? context "#") (re-matches #"[0-9-]" trigger)))
+                       ;; component ids, animation ids and urls may contain digits and hyphens
+                       (and (or (string/starts-with? context "#") (= "url" context))
+                            (re-matches #"[0-9-]" trigger)))
                    ;; "#" only triggers completions at the start of a quoted
                    ;; string, where the completion context recognizes it as a
-                   ;; component id position; elsewhere it's the Lua length
-                   ;; operator
-                   (or (not= "#" trigger) (= "#" context))
+                   ;; component id position, or inside a url; elsewhere it's the
+                   ;; Lua length operator
+                   (or (not= "#" trigger) (contains? #{"#" "url"} context))
+                   ;; "/" only triggers completions inside a quoted string, where
+                   ;; the completion context recognizes it as a url; elsewhere
+                   ;; it's the division operator
+                   (or (not= "/" trigger) (= "url" context))
                    (not (string/starts-with? syntax-scope "punctuation.definition.string.end"))
                    (not (string/starts-with? syntax-scope "comment")))))))
 

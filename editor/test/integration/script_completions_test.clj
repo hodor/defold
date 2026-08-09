@@ -42,3 +42,50 @@
         (g/transact (g/delete-node camera-node))
         (is (= ["gui" "script" "session_proxy"]
                (mapv :name (get (g/node-value script-node :completions) "#"))))))))
+
+(deftest url-completions-test
+  (test-util/with-loaded-project
+    (testing "script completes the urls of game objects in its collection"
+      (let [session-script (test-util/resource-node project "/logic/session/session.script")
+            urls (into #{} (map :name) (get (g/node-value session-script :completions) "url"))]
+        ;; session.collection hosts the "session" and "hud" game objects
+        (is (contains? urls "/session"))
+        (is (contains? urls "/hud"))
+        ;; and each game object's components are addressable
+        (is (contains? urls "/session#script"))
+        (is (contains? urls "/session#level01_proxy"))
+        (is (contains? urls "/hud#gui"))))
+    (testing "urls cover referenced, embedded and nested game objects"
+      (let [props-script (test-util/resource-node project "/script/props.script")
+            urls (into #{} (map :name) (get (g/node-value props-script :completions) "url"))]
+        ;; props.script is a component of the referenced "props" game object and
+        ;; the embedded "props_embedded" game object in props.collection, which
+        ;; is in turn nested in sub_props.collection under the "props" instance
+        (is (contains? urls "/props"))
+        (is (contains? urls "/props_embedded"))
+        (is (contains? urls "/props/props"))))
+    (testing "a parented game object sees its collection siblings, and embedded components get full urls"
+      (let [ball-script (test-util/resource-node project "/logic/session/ball.script")
+            urls (into #{} (map :name) (get (g/node-value ball-script :completions) "url"))]
+        ;; ball is parented under paddle in base_level.collection but still sees every sibling
+        (is (contains? urls "/paddle"))
+        (is (contains? urls "/left_wall"))
+        (is (contains? urls "/roof"))
+        ;; an embedded component resolves to /instance#id, never a bare #id
+        (is (contains? urls "/ball#co"))
+        (is (not (contains? urls "#co")))))
+    (testing "urls follow graph changes"
+      (let [session-script (test-util/resource-node project "/logic/session/session.script")
+            session-collection (test-util/resource-node project "/logic/session/session.collection")
+            hud-instance (get (g/node-value session-collection :go-inst-ids) "hud")]
+        (g/transact (g/set-property hud-instance :id "heads_up"))
+        (let [urls (into #{} (map :name) (get (g/node-value session-script :completions) "url"))]
+          (is (contains? urls "/heads_up"))
+          (is (not (contains? urls "/hud"))))))
+    ;; destructive: clearing an instance path must run last in this shared fixture
+    (testing "an instance with no prototype does not break url completion"
+      (let [ball-script (test-util/resource-node project "/logic/session/ball.script")
+            base-level (test-util/resource-node project "/logic/session/base_level.collection")
+            left-wall (get (g/node-value base-level :go-inst-ids) "left_wall")]
+        (g/transact (g/set-property left-wall :path {:resource nil :overrides []}))
+        (is (some? (get (g/node-value ball-script :completions) "url")))))))
