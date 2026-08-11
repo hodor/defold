@@ -74,4 +74,19 @@
   (testing "animation argument matches without a space after the comma"
     (let [context (completion-context "sprite.play_flipbook('#hero','" #{"." "#"} anim-grammar)]
       (is (= "#anim:hero" (:context context)))
-      (is (= "" (:query context))))))
+      (is (= "" (:query context)))))
+  (testing "a string starting with a slash is a url context"
+    (let [context (completion-context "msg.post(\"/" #{"." "#" "/"})]
+      (is (= "url" (:context context)))
+      (is (= "/" (:query context)))))
+  (testing "url query keeps the whole path including nesting and the component"
+    (let [context (completion-context "msg.post(\"/enemies/boss#spr" #{"." "#" "/"})]
+      (is (= "url" (:context context)))
+      (is (= "/enemies/boss#spr" (:query context)))))
+  (testing "a division is not a url context"
+    (let [context (completion-context "local half = width /" #{"." "#" "/"})]
+      (is (= "" (:context context)))
+      (is (= "" (:query context)))))
+  (testing "url context requires the slash trigger character"
+    (let [context (completion-context "msg.post(\"/enemies" #{"." "#"})]
+      (is (not= "url" (:context context))))))

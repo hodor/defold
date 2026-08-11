@@ -138,7 +138,7 @@
                  :close-scopes {\' "punctuation.definition.string.quoted.end.lua"
                                 \" "punctuation.definition.string.quoted.end.lua"
                                 \] "punctuation.definition.string.end.lua"}}
-   :completion-trigger-characters #{"." "#"}
+   :completion-trigger-characters #{"." "#" "/"}
    :ignored-completion-trigger-characters #{"{" ","}
    ;; When the text before the cursor matches a pattern, the completion context
    ;; becomes the pattern's context formatted with capture group 1 and the
@@ -533,6 +533,86 @@
                               (mapv #(code-completion/make % :type :property) anim-ids)))))))))
           game-object-node-ids)))
 
+(defn- owning-game-object-instance-ids
+  "Game object instance node ids that host the game objects using a node
+
+  [[owning-game-object-ids]] finds the source game objects. A referenced game
+  object is instantiated in a collection through an override game object; an
+  embedded game object is its own instance. Either way the owner of the game
+  object is the instance node, which is scoped to its collection."
+  [basis node-id ^long resource-hops]
+  (into #{}
+        (comp
+          (mapcat #(cons % (g/overrides basis %)))
+          (keep #(core/owner-node-id basis %)))
+        (owning-game-object-ids basis node-id resource-hops)))
+
+(defn- containing-collection-id
+  "The collection node scoping a game object instance
+
+  Walks up through parent game object instances (a parented instance is scoped
+  to its parent, not directly to the collection). Returns nil when the instance
+  is not in a collection, e.g. a game object opened on its own."
+  [basis instance-node-id]
+  (loop [node-id (core/scope basis instance-node-id)]
+    (when node-id
+      (if (and (g/node-instance? basis resource/ResourceNode node-id)
+               (g/has-output? (g/node-type* basis node-id) :go-inst-ids))
+        node-id
+        (recur (core/scope basis node-id))))))
+
+(defn- collection-urls
+  "url + owning-collection-proj-path pairs for every game object and component in
+  a collection
+
+  The game object instance's own :url resolves nested-collection prefixes, but an
+  embedded component has no override node and so no resolved :url; its url is
+  therefore composed from the instance url and the component id."
+  [evaluation-context basis collection-node-id]
+  (let [collection-proj-path (some->> (resource-node/owner-resource-node-id basis collection-node-id)
+                                      (resource-node/resource basis)
+                                      resource/proj-path)]
+    (eduction
+      (mapcat
+        (fn [[_ instance-node-id]]
+          (let [instance-url (g/node-value instance-node-id :url evaluation-context)]
+            (when-not (g/error-value? instance-url)
+              (let [source-id (g/node-value instance-node-id :source-id evaluation-context)
+                    component-ids (when (and source-id (g/has-output? (g/node-type* basis source-id) :component-ids))
+                                    (keys (g/node-value source-id :component-ids evaluation-context)))]
+                (eduction
+                  (map #(pair % collection-proj-path))
+                  (cons instance-url (map #(str instance-url "#" %) component-ids))))))))
+      (g/node-value collection-node-id :go-inst-ids evaluation-context))))
+
+(defn- url-completions
+  "Completions for the urls of the game objects addressable from this script
+
+  Every game object in the collection(s) hosting the script contributes its own
+  url (e.g. \"/enemies/boss\") and one url per component (e.g.
+  \"/enemies/boss#sprite\"), read from the live graph so nested collections
+  address correctly and unsaved edits are included. When a game object is
+  instantiated in more than one collection the completion's :detail lists the
+  collections it came from, as component-id completions do."
+  [evaluation-context script-node-id]
+  (let [basis (:basis evaluation-context)
+        collection-node-ids (into #{}
+                                  (keep #(containing-collection-id basis %))
+                                  (owning-game-object-instance-ids basis script-node-id 1))
+        url->collection-proj-paths
+        (reduce
+          (fn [acc [url collection-proj-path]]
+            (update acc url (fnil conj (sorted-set)) collection-proj-path))
+          (sorted-map)
+          (eduction
+            (mapcat #(collection-urls evaluation-context basis %))
+            collection-node-ids))]
+    (mapv (fn [[url collection-proj-paths]]
+            (code-completion/make url
+                                  :type :property
+                                  :detail (string/join ", " collection-proj-paths)))
+          url->collection-proj-paths)))
+
 (g/defnode LuaCodeNode
   (inherits r/CodeEditorResourceNode)
 
@@ -545,13 +625,16 @@
   ;; not seem to be much of a perf issue.
   (output breakpoints project/Breakpoints produce-breakpoints)
 
-  ;; The "#" completions are found by walking graph arcs, which the dependency
-  ;; system cannot track; this output is uncached so every pull reads the
-  ;; current graph state. Scripts that are not components of a game object
-  ;; contribute no "#" completions.
+  ;; The "#" and "url" completions are found by walking graph arcs, which the
+  ;; dependency system cannot track; this output is uncached so every pull reads
+  ;; the current graph state. Scripts that are not components of a game object
+  ;; contribute no such completions. The "url" completions enumerate the whole
+  ;; collection, so they are computed lazily and only realized when the url
+  ;; context is selected, not on every completion session.
   (output completions g/Any (g/fnk [^:unsafe _evaluation-context _node-id script-intelligence-completions]
                               (merge script-intelligence-completions
-                                     {"#" (component-id-completions _evaluation-context _node-id)}
+                                     {"#" (component-id-completions _evaluation-context _node-id)
+                                      "url" (lazy-seq (url-completions _evaluation-context _node-id))}
                                      (animation-id-completions _evaluation-context _node-id))))
   (output resource-with-lines script-annotations/ResourceWithLines (g/fnk [resource lines :as ret] ret)))
 
