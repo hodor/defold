@@ -515,6 +515,7 @@
                    :icon "icons/32/Icons_12-Script-type.png"
                    :icon-class :script
                    :category (localization/message "resource.category.scripts")
+                   :reference-completions true
                    :tags #{:debuggable}}
                   {:ext "lua"
                    :node-type LuaNode

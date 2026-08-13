@@ -270,7 +270,9 @@
                       "/player#controller"
                       "/player#player-visual"
                       "/readonly"
-                      "/readonly#readonly-controller"}
+                      "/readonly#readonly-controller"
+                      "/hud"
+                      "/hud#hud"}
           other-urls #{"/other-player"
                        "/other-player#controller"
                        "/other-player#player-visual"
@@ -352,12 +354,47 @@
                   :type :plaintext}
                  (:insert completion)))))
 
+      (testing "Animation ids in scripts"
+        (is (= #{"idle" "walk"}
+               (completion-labels! "/scripts/player.script" "local anim_double = sprite.play_flipbook(\"#player-visual\", \"")))
+        (is (= #{"idle" "walk"}
+               (completion-labels! "/scripts/player.script" "local anim_single = sprite.play_flipbook('#player-visual', '")))
+        (is (= ["idle" "walk"]
+               (mapv :display-string
+                     (completion-items! "/scripts/player.script" "local anim_double = sprite.play_flipbook(\"#player-visual\", \""))))
+        (let [completion (coll/first-where
+                           #(= "walk" (:display-string %))
+                           (completion-items! "/scripts/player.script" "local anim_double = sprite.play_flipbook(\"#player-visual\", \"wa"))]
+          (is (= {:value "walk"
+                  :cursor-range (data/->CursorRange (data/->Cursor 27 60) (data/->Cursor 27 62))
+                  :type :plaintext}
+                 (:insert completion))))
+        (is (= #{}
+               (completion-labels! "/scripts/player.script" "local anim_no_anims = sprite.play_flipbook(\"#controller\", \"")))
+        (is (= #{}
+               (completion-labels! "/scripts/player.script" "local anim_unknown = sprite.play_flipbook(\"#missing\", \"")))
+        (is (= #{}
+               (completion-labels! "/scripts/player.script" "local anim_url = sprite.play_flipbook(\"/player#player-visual\", \"")))
+        (is (= #{}
+               (completion-labels! "/scripts/player.script" "local anim_var = sprite.play_flipbook(anim_component, \""))))
+
+      (testing "Component ids and urls in gui scripts"
+        (is (= #{"hud"}
+               (completion-labels! "/scripts/hud.gui_script" "local hash_double = \"#")))
+        (is (= main-urls
+               (completion-labels! "/scripts/hud.gui_script" "local path_double = \"/pla")))
+        (is (= #{}
+               (completion-labels! "/scripts/hud.gui_script" "local require_double = require(\"/pla")))
+        ;; a gui script referenced by no gui scene has no usage context
+        (is (= #{}
+               (completion-labels! "/scripts/ignored.gui_script" "local path = \"/pla"))))
+
       (testing "Direct and transitive Lua module contexts"
         (is (= player-urls
                (completion-labels! "/modules/direct.lua" "local path_double = \"/pla")))
         (is (= shared-module-urls
                (completion-labels! "/modules/shared.lua" "local path_double = \"/")))
-        (is (= #{"boss-controller" "boss-visual" "controller" "enemy-controller" "enemy-visual" "player-visual"}
+        (is (= #{"boss-controller" "boss-visual" "controller" "enemy-controller" "enemy-visual" "hud" "player-visual"}
                (completion-labels! "/modules/shared.lua" "local hash_single = '#")))
         (is (= #{}
                (completion-labels! "/modules/unrequired.lua" "local path = \"/"))))
@@ -379,8 +416,6 @@
                (completion-labels! "/scripts/player.script" "local escaped_quote = \"\\\"/pla"))))
 
       (testing "Other Lua-backed resource types"
-        (is (= #{}
-               (completion-labels! "/scripts/ignored.gui_script" "local path = \"/pla")))
         (is (= #{}
                (completion-labels! "/scripts/ignored.render_script" "local path = \"/pla"))))
 

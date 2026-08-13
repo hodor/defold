@@ -1,0 +1,9 @@
+local shared = require("modules.shared")
+
+local hash_double = "#"
+local path_double = "/pla"
+
+function init(self)
+    shared.init(self)
+end
+local require_double = require("/pla")

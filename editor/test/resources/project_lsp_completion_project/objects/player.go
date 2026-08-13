@@ -4,5 +4,5 @@ components {
 }
 components {
   id: "player-visual"
-  component: "/scripts/visual.script"
+  component: "/objects/visual.sprite"
 }

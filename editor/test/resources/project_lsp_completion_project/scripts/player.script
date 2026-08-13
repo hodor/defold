@@ -25,3 +25,9 @@ local require_global_no_parens = _G.require '/pla'
 function init(self)
     direct.init(self)
 end
+local anim_double = sprite.play_flipbook("#player-visual", "wa")
+local anim_single = sprite.play_flipbook('#player-visual', 'wa')
+local anim_no_anims = sprite.play_flipbook("#controller", "wa")
+local anim_unknown = sprite.play_flipbook("#missing", "wa")
+local anim_url = sprite.play_flipbook("/player#player-visual", "wa")
+local anim_var = sprite.play_flipbook(anim_component, "wa")
