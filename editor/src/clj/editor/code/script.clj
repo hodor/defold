@@ -15,31 +15,25 @@
 (ns editor.code.script
   (:require [clojure.string :as string]
             [dynamo.graph :as g]
-            [editor.code-completion :as code-completion]
             [editor.code.data :as data]
             [editor.code.resource :as r]
             [editor.code.script-annotations :as script-annotations]
             [editor.code.script-compilation :as script-compilation]
             [editor.code.script-intelligence :as script-intelligence]
-            [editor.core :as core]
             [editor.defold-project :as project]
             [editor.graph-util :as gu]
             [editor.localization :as localization]
             [editor.lsp :as lsp]
+            [editor.lua :as lua]
             [editor.lua-parser :as lua-parser]
             [editor.properties :as properties]
             [editor.resource :as resource]
-            [editor.resource-node :as resource-node]
             [editor.types :as types]
-            [internal.graph.types :as gt]
             [schema.core :as s]
-            [util.coll :as coll :refer [pair]]))
+            [util.coll :as coll]))
 
 (set! *warn-on-reflection* true)
 (set! *unchecked-math* :warn-on-boxed)
-
-(g/deftype Modules [String])
-
 
 ;; Lua block open/close keywords for indentation
 (def lua-open-keywords #{"do" "then" "function" "else" "repeat"})
@@ -59,7 +53,7 @@
 (defn lua-opens-block? [^String line]
   (let [len (.length line)]
     (if (or (zero? len)
-            (.startsWith (clojure.string/triml line) "--"))
+            (.startsWith (string/triml line) "--"))
       false
       (loop [i 0
              token (StringBuilder.)
@@ -71,8 +65,8 @@
         (if (>= i len)
           (let [tokens (if (pos? (.length token)) (conj tokens (.toString token)) tokens)]
             (or (= last-non-space \{)
-                (and (some lua-open-keywords tokens)
-                     (not (some lua-close-keywords tokens)))))
+                (and (coll/some lua-open-keywords tokens)
+                     (not (coll/some lua-close-keywords tokens)))))
           (let [ch (.charAt line (long i))]
             (cond
               skip-rest
@@ -106,8 +100,8 @@
                                (conj tokens tok))
                              tokens)]
                 (recur (inc i) token in-quote false skip-rest
-                        (if (Character/isWhitespace ch) last-non-space ch)
-                        tokens)))))))))
+                       (if (Character/isWhitespace ch) last-non-space ch)
+                       tokens)))))))))
 
 (def lua-grammar
   {:name "Lua"
@@ -138,15 +132,8 @@
                  :close-scopes {\' "punctuation.definition.string.quoted.end.lua"
                                 \" "punctuation.definition.string.quoted.end.lua"
                                 \] "punctuation.definition.string.end.lua"}}
-   :completion-trigger-characters #{"." "#" "/"}
+   :completion-trigger-characters #{"."}
    :ignored-completion-trigger-characters #{"{" ","}
-   ;; When the text before the cursor matches a pattern, the completion context
-   ;; becomes the pattern's context formatted with capture group 1 and the
-   ;; completion query becomes capture group 2. Used to complete animation ids
-   ;; of the component addressed by a play-animation call's url argument.
-   :string-argument-completion-patterns
-   [{:pattern #"sprite\.play_flipbook\s*\(\s*[\"']#([a-zA-Z0-9_-]+)[\"']\s*,\s*[\"']([a-zA-Z0-9_-]*)$"
-     :context-format "#anim:%s"}]
    :patterns [{:captures {1 {:name "keyword.control.lua"}
                           2 {:name "entity.name.function.scope.lua"}
                           3 {:name "entity.name.function.lua"}
@@ -335,11 +322,11 @@
 
 (defn- create-script-property [script-node-id name type resource-kind value]
   (g/make-nodes (g/node-id->graph-id script-node-id) [node-id [ScriptPropertyNode :name name]]
-                (edit-script-property node-id type resource-kind value)
-                (g/connect node-id :_node-id script-node-id :nodes)
-                (g/connect node-id :build-targets script-node-id :resource-property-build-targets)
-                (g/connect node-id :name+node-id script-node-id :script-property-name+node-ids)
-                (g/connect node-id :property-entries script-node-id :script-property-entries)))
+    (edit-script-property node-id type resource-kind value)
+    (g/connect node-id :_node-id script-node-id :nodes)
+    (g/connect node-id :build-targets script-node-id :resource-property-build-targets)
+    (g/connect node-id :name+node-id script-node-id :script-property-name+node-ids)
+    (g/connect node-id :property-entries script-node-id :script-property-entries)))
 
 (defn- update-script-properties [evaluation-context script-node-id old-value new-value]
   (assert (or (nil? old-value) (vector? old-value)))
@@ -432,187 +419,6 @@
     (filter data/breakpoint-region?)
     (map (partial region->breakpoint resource))))
 
-(defn- owning-game-object-id
-  "Returns the node id of the game object that owns a node, or nil"
-  [basis node-id]
-  (loop [node-id node-id]
-    (when node-id
-      (if (g/has-output? (g/node-type* basis node-id) :component-ids)
-        node-id
-        (recur (core/owner-node-id basis node-id))))))
-
-(defn- referencing-node-ids
-  "Node ids of the nodes that consume outputs of a node or its overrides"
-  [basis node-id]
-  (into []
-        (comp
-          (coll/tree-xf any? #(g/overrides basis %))
-          (mapcat #(g/explicit-arcs-by-source basis %))
-          (map gt/target-id))
-        [node-id]))
-
-(defn- owning-game-object-ids
-  "Game object node ids whose components reference a node
-
-  A referencing resource node without an owning game object is followed
-  through resource-hops more referencing levels; one level finds the game
-  objects hosting a gui component when the node is a gui script."
-  [basis node-id ^long resource-hops]
-  (into #{}
-        (mapcat
-          (fn [target-id]
-            (if-let [game-object-node-id (owning-game-object-id basis target-id)]
-              [(g/override-root basis game-object-node-id)]
-              (when (and (pos? resource-hops)
-                         (g/node-instance? basis resource/ResourceNode target-id))
-                (owning-game-object-ids basis target-id (dec resource-hops))))))
-        (referencing-node-ids basis node-id)))
-
-(defn- component-id-completions
-  "Completions for the component ids of the game objects using this script
-
-  The game objects are found by walking the graph arcs from the script node to
-  the components that reference it, the same way the Show References dialog
-  finds referencing resources. For gui scripts the walk passes through the gui
-  scene to the game objects hosting it as a component."
-  [evaluation-context script-node-id]
-  (let [basis (:basis evaluation-context)
-        game-object-node-ids (owning-game-object-ids basis script-node-id 1)
-        component-id->owner-proj-paths
-        (reduce
-          (fn [acc [component-id owner-proj-path]]
-            (update acc component-id (fnil conj (sorted-set)) owner-proj-path))
-          (sorted-map)
-          (eduction
-            (mapcat
-              (fn [game-object-node-id]
-                (let [owner-proj-path
-                      (some->> (resource-node/owner-resource-node-id basis game-object-node-id)
-                               (resource-node/resource basis)
-                               resource/proj-path)]
-                  (eduction
-                    (keep (fn [component-id]
-                            (when owner-proj-path
-                              (pair component-id owner-proj-path))))
-                    (keys (g/node-value game-object-node-id :component-ids evaluation-context))))))
-            game-object-node-ids))]
-    (mapv (fn [[component-id owner-proj-paths]]
-            (code-completion/make component-id
-                                  :type :property
-                                  :detail (string/join ", " owner-proj-paths)))
-          component-id->owner-proj-paths)))
-
-(defn- component-source-resource-node-id
-  "The resource node backing a component node, e.g. the .sprite node behind a
-  sprite component"
-  [basis component-node-id]
-  (some (fn [arc]
-          (let [source-id (gt/source-id arc)]
-            (when (g/node-instance? basis resource/ResourceNode source-id)
-              source-id)))
-        (g/explicit-arcs-by-target basis component-node-id :source-build-targets)))
-
-(defn- animation-id-completions
-  "A map from \"#anim:<component-id>\" to completions for the animation ids of
-  that component, for every component of the game objects using this script
-  whose resource type exposes animation ids"
-  [evaluation-context script-node-id]
-  (let [basis (:basis evaluation-context)
-        game-object-node-ids (owning-game-object-ids basis script-node-id 1)]
-    (into {}
-          (comp
-            (mapcat #(g/node-value % :component-ids evaluation-context))
-            (keep
-              (fn [[component-id component-node-id]]
-                (when-let [source-id (component-source-resource-node-id basis component-node-id)]
-                  (when (g/has-output? (g/node-type* basis source-id) :anim-ids)
-                    (let [anim-ids (g/node-value source-id :anim-ids evaluation-context)]
-                      (when (and (not (g/error-value? anim-ids))
-                                 (seq anim-ids))
-                        (pair (str "#anim:" component-id)
-                              (mapv #(code-completion/make % :type :property) anim-ids)))))))))
-          game-object-node-ids)))
-
-(defn- owning-game-object-instance-ids
-  "Game object instance node ids that host the game objects using a node
-
-  [[owning-game-object-ids]] finds the source game objects. A referenced game
-  object is instantiated in a collection through an override game object; an
-  embedded game object is its own instance. Either way the owner of the game
-  object is the instance node, which is scoped to its collection."
-  [basis node-id ^long resource-hops]
-  (into #{}
-        (comp
-          (mapcat #(cons % (g/overrides basis %)))
-          (keep #(core/owner-node-id basis %)))
-        (owning-game-object-ids basis node-id resource-hops)))
-
-(defn- containing-collection-id
-  "The collection node scoping a game object instance
-
-  Walks up through parent game object instances (a parented instance is scoped
-  to its parent, not directly to the collection). Returns nil when the instance
-  is not in a collection, e.g. a game object opened on its own."
-  [basis instance-node-id]
-  (loop [node-id (core/scope basis instance-node-id)]
-    (when node-id
-      (if (and (g/node-instance? basis resource/ResourceNode node-id)
-               (g/has-output? (g/node-type* basis node-id) :go-inst-ids))
-        node-id
-        (recur (core/scope basis node-id))))))
-
-(defn- collection-urls
-  "url + owning-collection-proj-path pairs for every game object and component in
-  a collection
-
-  The game object instance's own :url resolves nested-collection prefixes, but an
-  embedded component has no override node and so no resolved :url; its url is
-  therefore composed from the instance url and the component id."
-  [evaluation-context basis collection-node-id]
-  (let [collection-proj-path (some->> (resource-node/owner-resource-node-id basis collection-node-id)
-                                      (resource-node/resource basis)
-                                      resource/proj-path)]
-    (eduction
-      (mapcat
-        (fn [[_ instance-node-id]]
-          (let [instance-url (g/node-value instance-node-id :url evaluation-context)]
-            (when-not (g/error-value? instance-url)
-              (let [source-id (g/node-value instance-node-id :source-id evaluation-context)
-                    component-ids (when (and source-id (g/has-output? (g/node-type* basis source-id) :component-ids))
-                                    (keys (g/node-value source-id :component-ids evaluation-context)))]
-                (eduction
-                  (map #(pair % collection-proj-path))
-                  (cons instance-url (map #(str instance-url "#" %) component-ids))))))))
-      (g/node-value collection-node-id :go-inst-ids evaluation-context))))
-
-(defn- url-completions
-  "Completions for the urls of the game objects addressable from this script
-
-  Every game object in the collection(s) hosting the script contributes its own
-  url (e.g. \"/enemies/boss\") and one url per component (e.g.
-  \"/enemies/boss#sprite\"), read from the live graph so nested collections
-  address correctly and unsaved edits are included. When a game object is
-  instantiated in more than one collection the completion's :detail lists the
-  collections it came from, as component-id completions do."
-  [evaluation-context script-node-id]
-  (let [basis (:basis evaluation-context)
-        collection-node-ids (into #{}
-                                  (keep #(containing-collection-id basis %))
-                                  (owning-game-object-instance-ids basis script-node-id 1))
-        url->collection-proj-paths
-        (reduce
-          (fn [acc [url collection-proj-path]]
-            (update acc url (fnil conj (sorted-set)) collection-proj-path))
-          (sorted-map)
-          (eduction
-            (mapcat #(collection-urls evaluation-context basis %))
-            collection-node-ids))]
-    (mapv (fn [[url collection-proj-paths]]
-            (code-completion/make url
-                                  :type :property
-                                  :detail (string/join ", " collection-proj-paths)))
-          url->collection-proj-paths)))
-
 (g/defnode LuaCodeNode
   (inherits r/CodeEditorResourceNode)
 
@@ -625,17 +431,15 @@
   ;; not seem to be much of a perf issue.
   (output breakpoints project/Breakpoints produce-breakpoints)
 
-  ;; The "#" and "url" completions are found by walking graph arcs, which the
-  ;; dependency system cannot track; this output is uncached so every pull reads
-  ;; the current graph state. Scripts that are not components of a game object
-  ;; contribute no such completions. The "url" completions enumerate the whole
-  ;; collection, so they are computed lazily and only realized when the url
-  ;; context is selected, not on every completion session.
-  (output completions g/Any (g/fnk [^:unsafe _evaluation-context _node-id script-intelligence-completions]
-                              (merge script-intelligence-completions
-                                     {"#" (component-id-completions _evaluation-context _node-id)
-                                      "url" (lazy-seq (url-completions _evaluation-context _node-id))}
-                                     (animation-id-completions _evaluation-context _node-id))))
+  (output completions g/Any :cached (gu/passthrough script-intelligence-completions))
+  (output required-module-info script-intelligence/RequiredModuleInfo :cached
+          (g/fnk [_node-id resource lines]
+            [_node-id
+             (resource/proj-path resource)
+             (with-open [reader (data/lines-reader lines)]
+               (coll/into-> (lua-parser/modules reader) []
+                 (remove lua/preinstalled-modules)
+                 (map lua/lua-module->path)))]))
   (output resource-with-lines script-annotations/ResourceWithLines (g/fnk [resource lines :as ret] ret)))
 
 (g/defnode LuaNode
@@ -695,6 +499,7 @@
                    :icon "icons/32/Icons_12-Script-type.png"
                    :icon-class :script
                    :category (localization/message "resource.category.scripts")
+                   :reference-completions true
                    :tags #{:component :debuggable :non-embeddable :overridable-properties}
                    :tag-opts {:component {:transform-properties #{}}}}
                   {:ext "render_script"
@@ -718,10 +523,11 @@
                    :icon-class :script
                    :category (localization/message "resource.category.scripts")
                    :annotations true
+                   :reference-completions true
                    :tags #{:debuggable}}])
 
 (defn- additional-load-fn
-  [annotations project self resource]
+  [annotations reference-completions project self resource]
   (g/with-auto-evaluation-context evaluation-context
     (let [code-preprocessors (project/code-preprocessors project evaluation-context)
           script-intelligence (project/script-intelligence project evaluation-context)
@@ -729,18 +535,20 @@
       (concat
         (g/connect code-preprocessors :lua-preprocessors self :lua-preprocessors)
         (g/connect script-intelligence :lua-completions self :script-intelligence-completions)
+        (when reference-completions
+          (g/connect self :required-module-info script-intelligence :required-module-infos))
         (when (and annotations (resource/zip-resource? resource))
           (g/connect self :resource-with-lines script-annotations :script-annotations))))))
 
 (defn register-resource-types [workspace]
   (for [def script-defs
         :let [args (-> def
-                       (dissoc :annotations)
+                       (dissoc :annotations :reference-completions)
                        (assoc
                          :built-pb-class script-compilation/built-pb-class
                          :language "lua"
                          :lazy-loaded false
-                         :additional-load-fn (partial additional-load-fn (:annotations def))
+                         :additional-load-fn (partial additional-load-fn (:annotations def) (:reference-completions def))
                          :view-types [:code :default]
                          :view-opts lua-code-opts))]]
     (apply r/register-code-resource-type workspace (mapcat identity args))))

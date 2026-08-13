@@ -48,6 +48,7 @@
             [editor.debugging.variable-tree :as variable-tree]
             [editor.defold-project :as project]
             [editor.dialogs :as dialogs]
+            [editor.editor-extensions.coerce :as coerce]
             [editor.editor-extensions.node-types :as node-types]
             [editor.error-reporting :as error-reporting]
             [editor.fxui :as fxui]
@@ -915,10 +916,7 @@
   The map includes following keys (all required):
     :context           a string indicating a context in which the built-in
                        completions should be requested, e.g. for string
-                       \"socket.d\" before cursor the context will be \"socket\",
-                       and for string \"go.some_id\" opened with a quote before
-                       cursor the context will be \"#\" when \"#\" is a
-                       completion trigger character
+                       \"socket.d\" before cursor the context will be \"socket\"
     :query             a string used for filtering completions, e.g. for string
                        \"socket.d\" before cursor the query will be \"d\"
     :cursor-ranges     replacement ranges that should be used when
@@ -930,36 +928,20 @@
                        complete LSP completion list should be refreshed
     :trigger           single-character trigger string before cursor (\"\\n\" on
                        the start of the line, even it's the first one)"
-  [lines cursor-ranges completion-trigger-characters grammar]
+  [lines cursor-ranges]
   {:pre [(pos? (count cursor-ranges))]}
-  (let [hash-context (contains? completion-trigger-characters "#")
-        url-context (contains? completion-trigger-characters "/")
-        arg-patterns (:string-argument-completion-patterns grammar)
-        results (mapv (fn [^CursorRange cursor-range]
+  (let [results (mapv (fn [^CursorRange cursor-range]
                         (let [suggestion-cursor (data/adjust-cursor lines (data/cursor-range-start cursor-range))
                               line (subs (lines (.-row suggestion-cursor)) 0 (.-col suggestion-cursor))
-                              [context query] (or (some (fn [{:keys [pattern context-format]}]
-                                                          (when-let [[_ group query] (re-find pattern line)]
-                                                            [(format context-format group) query]))
-                                                        arg-patterns)
-                                                  ;; A string literal beginning with "/" is a game
-                                                  ;; object url; the whole path (including any "#")
-                                                  ;; is the query for the "url" completions.
-                                                  (when-let [url-query (when url-context
-                                                                         (second (re-find #"[\"'](/[a-zA-Z0-9_/#.-]*)$" line)))]
-                                                    ["url" url-query])
-                                                  (if-let [hash-query (when hash-context
-                                                                        (second (re-find #"[\"']#([a-zA-Z0-9_-]*)$" line)))]
-                                                    ["#" hash-query]
-                                                    (let [prefix (or (re-find #"[a-zA-Z_][a-zA-Z_0-9.]*$" line) "")
-                                                          last-dot (string/last-index-of prefix ".")]
-                                                      [(if last-dot (subs prefix 0 last-dot) "")
-                                                       (if last-dot (subs prefix (inc ^long last-dot)) prefix)])))
+                              prefix (or (re-find #"[a-zA-Z_][a-zA-Z_0-9.]*$" line) "")
                               affected-cursor (if (pos? (data/compare-cursor-position
                                                           (.-from cursor-range)
                                                           (.-to cursor-range)))
                                                 :to
                                                 :from)
+                              last-dot (string/last-index-of prefix ".")
+                              context (if last-dot (subs prefix 0 last-dot) "")
+                              query (if last-dot (subs prefix (inc ^long last-dot)) prefix)
                               replacement-range (update cursor-range affected-cursor update :col - (count query))]
                           [replacement-range context query]))
                       cursor-ranges)
@@ -1413,10 +1395,10 @@
                  :spacing :small
                  :children (cond-> [{:fx/type code-type-icon :type kind}
                                     {:fx/type fxui/label :text name}]
-                                   (not (coll/empty? detail))
-                                   (conj {:fx/type fxui/label
-                                          :text (summarize-document-symbol-detail detail)
-                                          :color :hint}))}})))
+                             (not (coll/empty? detail))
+                             (conj {:fx/type fxui/label
+                                    :text (summarize-document-symbol-detail detail)
+                                    :color :hint}))}})))
 
 (defn- navigate-to-document-symbol! [view-node document-symbol]
   (when document-symbol
@@ -1555,8 +1537,8 @@
                              :document-symbols document-symbols
                              :localization localization
                              :view-node _node-id}}]
-                    (has-visible-properties? resource-properties)
-                    (conj :properties-pane))))
+              (has-visible-properties? resource-properties)
+              (conj :properties-pane))))
 
   ;; the cursor position for which we show the hover.
   (property hover-showing-cursor g/Any (dynamic visible (g/constantly false)))
@@ -1689,7 +1671,6 @@
     MouseButton/MIDDLE :middle
     MouseButton/BACK :back
     MouseButton/FORWARD :forward))
-
 
 ;; -----------------------------------------------------------------------------
 ;; Code completion
@@ -1888,24 +1869,12 @@
    (g/with-auto-evaluation-context evaluation-context
      (implies-completions? view-node evaluation-context)))
   ([view-node evaluation-context]
-   (let [{:keys [trigger request-cursor context]} (get-property view-node :completion-context evaluation-context)
+   (let [{:keys [trigger request-cursor]} (get-property view-node :completion-context evaluation-context)
          trigger-characters (get-property view-node :completion-trigger-characters evaluation-context)
          syntax-scope (syntax-scope-before-cursor view-node request-cursor evaluation-context)]
      (boolean (and (not (contains? #{"\n" "\t" " "} trigger))
                    (or (re-matches #"[a-zA-Z_]" trigger)
-                       (contains? trigger-characters trigger)
-                       ;; component ids, animation ids and urls may contain digits and hyphens
-                       (and (or (string/starts-with? context "#") (= "url" context))
-                            (re-matches #"[0-9-]" trigger)))
-                   ;; "#" only triggers completions at the start of a quoted
-                   ;; string, where the completion context recognizes it as a
-                   ;; component id position, or inside a url; elsewhere it's the
-                   ;; Lua length operator
-                   (or (not= "#" trigger) (contains? #{"#" "url"} context))
-                   ;; "/" only triggers completions inside a quoted string, where
-                   ;; the completion context recognizes it as a url; elsewhere
-                   ;; it's the division operator
-                   (or (not= "/" trigger) (= "url" context))
+                       (contains? trigger-characters trigger))
                    (not (string/starts-with? syntax-scope "punctuation.definition.string.end"))
                    (not (string/starts-with? syntax-scope "comment")))))))
 
@@ -2034,8 +2003,8 @@
       (set-properties! view-node :selection
                        (cond-> {:cursor-ranges new-cursor-ranges}
 
-                               (not= (count regions) (count new-regions))
-                               (assoc :regions new-regions))))))
+                         (not= (count regions) (count new-regions))
+                         (assoc :regions new-regions))))))
 
 (def ^:private prev-tab-trigger! #(select-closest-tab-trigger-region! :prev %))
 (def ^:private next-tab-trigger! #(select-closest-tab-trigger-region! :next %))
@@ -2861,8 +2830,8 @@
                               y)
             (cond->
               (and lsp
-                (prefs/get prefs hover-pref-path)
-                (not (get-property view-node :hover-mouse-over-popup evaluation-context)))
+                   (prefs/get prefs hover-pref-path)
+                   (not (get-property view-node :hover-mouse-over-popup evaluation-context)))
               (merge
                 (let [hover-character-cursor (data/canvas->character-cursor layout lines x y)]
                   (request-lsp-hover! view-node lsp resource-node hover-character-cursor evaluation-context))))))))
@@ -2976,13 +2945,13 @@
 (handler/defhandler :edit.cut :code-view
   (active? [editable] editable)
   (enabled? [view-node evaluation-context]
-            (has-selection? view-node evaluation-context))
+    (has-selection? view-node evaluation-context))
   (run [view-node clipboard] (cut! view-node clipboard)))
 
 (handler/defhandler :edit.paste :code-view
   (active? [editable] editable)
   (enabled? [view-node clipboard evaluation-context]
-            (can-paste? view-node clipboard evaluation-context))
+    (can-paste? view-node clipboard evaluation-context))
   (run [view-node clipboard] (paste! view-node clipboard)))
 
 (handler/defhandler :code.duplicate-selection :code-view
@@ -2995,8 +2964,8 @@
 
 (handler/defhandler :code.toggle-comment :code-view
   (active? [editable view-node evaluation-context]
-           (and editable
-                (contains? (get-property view-node :grammar evaluation-context) :line-comment)))
+    (and editable
+         (contains? (get-property view-node :grammar evaluation-context) :line-comment)))
   (run [view-node] (toggle-comment! view-node)))
 
 (handler/defhandler :code.delete-previous-char :code-view
@@ -3058,17 +3027,17 @@
 (handler/defhandler :code.reindent :code-view
   (active? [editable] editable)
   (enabled? [view-node evaluation-context]
-            (not-every? data/cursor-range-empty?
-                        (get-property view-node :cursor-ranges evaluation-context)))
+    (not-every? data/cursor-range-empty?
+                (get-property view-node :cursor-ranges evaluation-context)))
   (run [view-node]
-       (set-properties! view-node nil
-                        (data/reindent (get-property view-node :indent-level-pattern)
-                                       (get-property view-node :indent-string)
-                                       (get-property view-node :grammar)
-                                       (get-property view-node :lines)
-                                       (get-property view-node :cursor-ranges)
-                                       (get-property view-node :regions)
-                                       (get-property view-node :layout)))))
+    (set-properties! view-node nil
+                     (data/reindent (get-property view-node :indent-level-pattern)
+                                    (get-property view-node :indent-string)
+                                    (get-property view-node :grammar)
+                                    (get-property view-node :lines)
+                                    (get-property view-node :cursor-ranges)
+                                    (get-property view-node :regions)
+                                    (get-property view-node :layout)))))
 
 (handler/defhandler :code.convert-indentation :code-view
   (label [user-data]
@@ -3090,12 +3059,12 @@
         :user-data :four-spaces}]))
   (active? [editable] editable)
   (run [view-node user-data]
-       (set-properties! view-node nil
-                        (data/convert-indentation (get-property view-node :indent-type)
-                                                  user-data
-                                                  (get-property view-node :lines)
-                                                  (get-property view-node :cursor-ranges)
-                                                  (get-property view-node :regions)))))
+    (set-properties! view-node nil
+                     (data/convert-indentation (get-property view-node :indent-type)
+                                               user-data
+                                               (get-property view-node :lines)
+                                               (get-property view-node :cursor-ranges)
+                                               (get-property view-node :regions)))))
 
 (defn- show-goto-popup! [view-node open-resource-fn results]
   (g/with-auto-evaluation-context evaluation-context
@@ -3268,7 +3237,7 @@
                                                              display-name
                                                              indices
                                                              :deprecated (contains? tags :deprecated))
-                                                           :min-width :use-pref-size)]
+                                                      :min-width :use-pref-size)]
                                              (coll/not-empty detail)
                                              (conj {:fx/type fx.region/lifecycle
                                                     :h-box/hgrow :always
@@ -3459,26 +3428,26 @@
 
 (handler/defhandler :code.goto-line :code-view-tools
   (run [goto-line-bar]
-       (set-bar-ui-type! :goto-line)
-       (ui/with-controls goto-line-bar [^TextField line-field]
-         (.requestFocus line-field)
-         (.selectAll line-field))))
+    (set-bar-ui-type! :goto-line)
+    (ui/with-controls goto-line-bar [^TextField line-field]
+      (.requestFocus line-field)
+      (.selectAll line-field))))
 
 (handler/defhandler :private/goto-entered-line :goto-line-bar
   (enabled? [goto-line-bar view-node evaluation-context]
-            (some? (try-parse-goto-line-bar-row view-node goto-line-bar evaluation-context)))
+    (some? (try-parse-goto-line-bar-row view-node goto-line-bar evaluation-context)))
   (run [goto-line-bar view-node]
-       (when-some [line-number (try-parse-goto-line-bar-row view-node goto-line-bar)]
-         (let [cursor-range (data/Cursor->CursorRange (data/->Cursor line-number 0))]
-           (set-properties! view-node :navigation
-                            (data/select-and-frame (get-property view-node :lines)
-                                                   (get-property view-node :layout)
-                                                   cursor-range)))
-         (set-bar-ui-type! :hidden)
-         ;; Close bar on next tick so the code view will not insert a newline
-         ;; if the bar was dismissed by pressing the Enter key.
-         (ui/run-later
-           (focus-code-editor! view-node)))))
+    (when-some [line-number (try-parse-goto-line-bar-row view-node goto-line-bar)]
+      (let [cursor-range (data/Cursor->CursorRange (data/->Cursor line-number 0))]
+        (set-properties! view-node :navigation
+                         (data/select-and-frame (get-property view-node :lines)
+                                                (get-property view-node :layout)
+                                                cursor-range)))
+      (set-bar-ui-type! :hidden)
+      ;; Close bar on next tick so the code view will not insert a newline
+      ;; if the bar was dismissed by pressing the Enter key.
+      (ui/run-later
+        (focus-code-editor! view-node)))))
 
 ;; -----------------------------------------------------------------------------
 ;; Find & Replace
@@ -3614,49 +3583,49 @@
 
 (handler/defhandler :edit.find :code-view
   (run [find-bar view-node]
-       (when-some [selected-text (non-empty-single-selection-text view-node)]
-         (set-find-term! selected-text))
-       (set-bar-ui-type! :find)
-       (focus-term-field! find-bar)))
+    (when-some [selected-text (non-empty-single-selection-text view-node)]
+      (set-find-term! selected-text))
+    (set-bar-ui-type! :find)
+    (focus-term-field! find-bar)))
 
 (handler/defhandler :code.replace-text :code-view
   (active? [editable] editable)
   (run [replace-bar view-node]
-       (when-some [selected-text (non-empty-single-selection-text view-node)]
-         (set-find-term! selected-text))
-       (set-bar-ui-type! :replace)
-       (focus-term-field! replace-bar)))
+    (when-some [selected-text (non-empty-single-selection-text view-node)]
+      (set-find-term! selected-text))
+    (set-bar-ui-type! :replace)
+    (focus-term-field! replace-bar)))
 
 (handler/defhandler :edit.find :code-view-tools ;; In practice, from find / replace and go to line bars.
   (run [find-bar]
-       (set-bar-ui-type! :find)
-       (focus-term-field! find-bar)))
+    (set-bar-ui-type! :find)
+    (focus-term-field! find-bar)))
 
 (handler/defhandler :code.replace-text :code-view-tools
   (active? [editable] editable)
   (run [replace-bar]
-       (set-bar-ui-type! :replace)
-       (focus-term-field! replace-bar)))
+    (set-bar-ui-type! :replace)
+    (focus-term-field! replace-bar)))
 
 (handler/defhandler :code.escape :code-view-tools
   (run [find-bar replace-bar view-node]
-       (cond
-         (in-tab-trigger? view-node)
-         (exit-tab-trigger! view-node)
+    (cond
+      (in-tab-trigger? view-node)
+      (exit-tab-trigger! view-node)
 
-         (hover-visible? view-node)
-         (hide-hover! view-node)
+      (hover-visible? view-node)
+      (hide-hover! view-node)
 
-         (suggestions-visible? view-node)
-         (hide-suggestions! view-node)
+      (suggestions-visible? view-node)
+      (hide-suggestions! view-node)
 
-         (bar-ui-visible?)
-         (do (set-bar-ui-type! :hidden)
-             (focus-code-editor! view-node))
+      (bar-ui-visible?)
+      (do (set-bar-ui-type! :hidden)
+          (focus-code-editor! view-node))
 
-         :else
-         (set-properties! view-node :selection
-                          (data/escape (get-property view-node :cursor-ranges))))))
+      :else
+      (set-properties! view-node :selection
+                       (data/escape (get-property view-node :cursor-ranges))))))
 
 (handler/defhandler :code.find-next :code-view-find-bar
   (run [view-node] (find-next! view-node)))
@@ -3913,8 +3882,8 @@
                      tick-props
                      (let [new-cursor-opacity (cursor-opacity elapsed-time-at-last-action elapsed-time)]
                        (cond-> tick-props
-                               (not= old-cursor-opacity new-cursor-opacity)
-                               (assoc :cursor-opacity new-cursor-opacity))))]
+                         (not= old-cursor-opacity new-cursor-opacity)
+                         (assoc :cursor-opacity new-cursor-opacity))))]
     (set-properties! view-node nil props))
 
   ;; Repaint the view.
@@ -4033,8 +4002,8 @@
           gutter-shadow-color (color-lookup color-scheme "editor.gutter.shadow")
           gutter-breakpoint-color (color-lookup color-scheme "editor.gutter.breakpoint")
           gutter-cursor-line-background-color (color-lookup color-scheme (if (= :input-focused focus-state)
-                                                                            "editor.gutter.cursor.line.background"
-                                                                            "editor.gutter.cursor.line.background.inactive"))
+                                                                           "editor.gutter.cursor.line.background"
+                                                                           "editor.gutter.cursor.line.background.inactive"))
           gutter-execution-marker-current-color (color-lookup color-scheme "editor.gutter.execution-marker.current")
           gutter-execution-marker-frame-color (color-lookup color-scheme "editor.gutter.execution-marker.frame")]
 
@@ -4348,14 +4317,14 @@
                                     (g/node-value view-node :lines evaluation-context)
                                     (g/node-value view-node :regions evaluation-context)
                                     edited-breakpoint)
-                                  :edited-breakpoint edited-breakpoint))
+                             :edited-breakpoint edited-breakpoint))
 
                          :apply
                          (assoc (data/ensure-breakpoint-region
                                   (g/node-value view-node :lines evaluation-context)
                                   (g/node-value view-node :regions evaluation-context)
                                   edited-breakpoint)
-                                :edited-breakpoint nil)))
+                           :edited-breakpoint nil)))
                      (ui/user-data! (ui/main-scene) ::ui/refresh-requested? true))))}
         :middleware (comp
                       fxui/wrap-dedupe-desc
@@ -4654,6 +4623,27 @@
                                             cursor-range)))
   (done-fn))
 
+(def ^:private positive-integer-coercer
+  (coerce/wrap-with-pred coerce/integer pos? "is not positive"))
+
+(def ^:private cursor-coercer
+  (coerce/wrap-transform
+    (coerce/hash-map :req {:line positive-integer-coercer}
+                     :opt {:column positive-integer-coercer}
+                     :extra-keys false)
+    #(data/->Cursor (dec (long (:line %))) (dec (long (:column % 1))))))
+
+(def ^:private open-resource-args-coercer
+  (coerce/wrap-transform
+    (coerce/one-of
+      (coerce/wrap-transform cursor-coercer data/Cursor->CursorRange)
+      (coerce/wrap-transform
+        (coerce/hash-map :req {:from cursor-coercer
+                               :to cursor-coercer}
+                         :extra-keys false)
+        data/map->CursorRange))
+    #(hash-map :cursor-range %)))
+
 (defn register-view-types [workspace]
   (concat
     (workspace/register-view-type workspace
@@ -4661,12 +4651,14 @@
       :label (localization/message "resource.view.code")
       :make-view-fn make-view!
       :focus-fn focus-view!
+      :open-resource-args-coercer open-resource-args-coercer
       :text-selection-fn non-empty-single-selection-text)
     (workspace/register-view-type workspace
       :id :text
       :label (localization/message "resource.view.text")
       :make-view-fn make-view!
       :focus-fn focus-view!
+      :open-resource-args-coercer open-resource-args-coercer
       :text-selection-fn non-empty-single-selection-text)))
 
 (register-fundamental-read-only-handlers! *ns* :code-view :code-view-tools)
