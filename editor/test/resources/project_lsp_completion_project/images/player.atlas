@@ -1,0 +1,12 @@
+animations {
+  id: "idle"
+  images {
+    image: "/builtins/graphics/particle_blob.png"
+  }
+}
+animations {
+  id: "walk"
+  images {
+    image: "/builtins/graphics/particle_blob.png"
+  }
+}

@@ -11,6 +11,10 @@ instances {
   id: "readonly"
   prototype: "/non_editable/readonly.go"
 }
+instances {
+  id: "hud"
+  prototype: "/objects/hud.go"
+}
 collection_instances {
   id: "level"
   collection: "/levels/level.collection"

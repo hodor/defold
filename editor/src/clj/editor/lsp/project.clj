@@ -37,21 +37,34 @@
     (when-let [proj-path (workspace/as-proj-path basis workspace (.getPath (URI. uri)))]
       (workspace/find-resource basis workspace proj-path))))
 
-(defn- script-node-ids-requiring-module [basis requiring-resource-infos-by-module-proj-path module-proj-path]
+(defn- gui-scene-node-ids-using-script [basis gui-script-node-id]
+  (coll/into-> (g/targets-of basis gui-script-node-id :resource) #{}
+    (keep (fn [[node-id input-label]]
+            (when (and (= :script-resource input-label)
+                       (g/node-kw-instance? basis :editor.gui/GuiSceneNode node-id))
+              node-id)))))
+
+(defn- component-source-node-ids-requiring-module [basis requiring-resource-infos-by-module-proj-path module-proj-path]
   (coll/into-> (g/pre-traverse
                  basis
                  [[module-proj-path nil]]
                  (fn [_basis [proj-path _node-id]]
                    (requiring-resource-infos-by-module-proj-path proj-path))) #{}
-    (filter #(string/ends-with? (first %) ".script"))
-    (map second)))
+    (mapcat (fn [[proj-path node-id]]
+              (case (resource/filename->type-ext proj-path)
+                "script" [node-id]
+                "gui_script" (gui-scene-node-ids-using-script basis node-id)
+                nil)))))
 
-(defn- owning-game-object-node-ids [basis script-node-ids]
-  (coll/into-> script-node-ids #{}
+;; A component source (script, gui scene) reaches its owning ReferencedComponent
+;; through the source-resource arc: directly for non-overridable component types,
+;; through an override node for overridable ones.
+(defn- owning-game-object-node-ids [basis component-source-node-ids]
+  (coll/into-> component-source-node-ids #{}
     (mapcat #(e/cons % (g/overrides basis %)))
-    (mapcat #(g/targets-of basis % :_node-id))
+    (mapcat #(g/targets-of basis % :resource))
     (keep (fn [[node-id input-label]]
-            (when (and (= :source-id input-label)
+            (when (and (= :source-resource input-label)
                        (g/node-kw-instance? basis :editor.game-object/ReferencedComponent node-id))
               (some->> node-id
                        (core/owner-node-id basis)
@@ -110,13 +123,45 @@
                                              :character character}}
                                :newText url}}))))))
 
+;; The animation-name argument position of an animation-playing call whose first
+;; argument references a component in the same game object.
+(defn- animation-argument-component-id [text-before-string]
+  (second (re-find #"\b(?:sprite\s*\.\s*play_flipbook|model\s*\.\s*play_anim)\s*\(\s*[\"']#([^\"'/:]*)[\"']\s*,\s*$"
+                   text-before-string)))
+
+(defn- source-animation-ids [basis source-node-id evaluation-context]
+  (let [node-type (g/node-type* basis source-node-id)
+        label (coll/first-where #(g/has-output? node-type %) [:anim-ids :animation-ids])
+        anim-ids (when label (g/node-value source-node-id label evaluation-context))]
+    (when-not (g/error-value? anim-ids)
+      anim-ids)))
+
+(defn- complete-animation-ids [owner-root-ids component-id line character content evaluation-context]
+  (let [basis (:basis evaluation-context)
+        replacement-start (- character (count content))]
+    (->> owner-root-ids
+         (e/keep #(get (g/node-value % :component-ids evaluation-context) component-id))
+         (e/keep #(ffirst (g/sources-of basis % :source-resource)))
+         (e/mapcat #(source-animation-ids basis % evaluation-context))
+         (e/distinct)
+         (coll/sort util/natural-order)
+         (mapv (fn [anim-id]
+                 {:label anim-id
+                  :kind completion-item-kind-reference
+                  :textEdit {:range {:start {:line line
+                                             :character replacement-start}
+                                     :end {:line line
+                                           :character character}}
+                             :newText anim-id}})))))
+
 (defn- completion-owner-root-ids [project resource-node-id resource evaluation-context]
   (let [basis (:basis evaluation-context)]
     (owning-game-object-node-ids
       basis
-      (if (= "script" (resource/type-ext resource))
-        #{resource-node-id}
-        (script-node-ids-requiring-module
+      (case (resource/type-ext resource)
+        "script" #{resource-node-id}
+        "gui_script" (gui-scene-node-ids-using-script basis resource-node-id)
+        (component-source-node-ids-requiring-module
           basis
           (g/node-value
             (defold-project/script-intelligence project evaluation-context)
@@ -134,7 +179,8 @@
           (if (= index (.length line-prefix))
             (when (and (not= \u0000 quote)
                        (not (re-find #"\brequire\s*\(?\s*$" (subs line-prefix 0 string-start))))
-              (subs line-prefix (inc string-start)))
+              (coll/pair (subs line-prefix (inc string-start))
+                         (subs line-prefix 0 string-start)))
             (let [character (.charAt line-prefix index)]
               (if (= \u0000 quote)
                 (cond
@@ -166,36 +212,46 @@
           (or
             (when-let [requested-resource (uri->resource project uri evaluation-context)]
               (when-let [resource-node-id (defold-project/get-resource-node project requested-resource evaluation-context)]
-                (when-let [content (reference-completion-string resource-node-id line character evaluation-context)]
-                  (cond
-                    (string/starts-with? content "#")
-                    (complete-component-ids
-                      (completion-owner-root-ids project resource-node-id requested-resource evaluation-context)
-                      line
-                      character
-                      content
-                      evaluation-context)
-
-                    (string/starts-with? content "/")
-                    (complete-urls
-                      project
-                      (completion-owner-root-ids project resource-node-id requested-resource evaluation-context)
-                      nil
-                      line
-                      character
-                      content
-                      evaluation-context)
-
-                    :else
-                    (when-let [[_ socket] (re-matches #"([^#:]+):(?:/.*)?" content)]
-                      (complete-urls
-                        project
+                (when-let [[content text-before-string] (reference-completion-string resource-node-id line character evaluation-context)]
+                  (let [animation-component-id (animation-argument-component-id text-before-string)]
+                    (cond
+                      animation-component-id
+                      (complete-animation-ids
                         (completion-owner-root-ids project resource-node-id requested-resource evaluation-context)
-                        socket
+                        animation-component-id
                         line
                         character
                         content
-                        evaluation-context))))))
+                        evaluation-context)
+
+                      (string/starts-with? content "#")
+                      (complete-component-ids
+                        (completion-owner-root-ids project resource-node-id requested-resource evaluation-context)
+                        line
+                        character
+                        content
+                        evaluation-context)
+
+                      (string/starts-with? content "/")
+                      (complete-urls
+                        project
+                        (completion-owner-root-ids project resource-node-id requested-resource evaluation-context)
+                        nil
+                        line
+                        character
+                        content
+                        evaluation-context)
+
+                      :else
+                      (when-let [[_ socket] (re-matches #"([^#:]+):(?:/.*)?" content)]
+                        (complete-urls
+                          project
+                          (completion-owner-root-ids project resource-node-id requested-resource evaluation-context)
+                          socket
+                          line
+                          character
+                          content
+                          evaluation-context)))))))
             []))]
     {:isIncomplete true
      :items items}))
