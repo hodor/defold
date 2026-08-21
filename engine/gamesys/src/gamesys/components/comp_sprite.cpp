@@ -57,6 +57,8 @@ namespace dmGameSystem
 {
     using namespace dmVMath;
 
+    static const char* SPRITE_MAX_COUNT_KEY = "sprite.max_count";
+
     // In general, rare overrides should be kept out of the struct, to keep memory down
     struct SpriteResourceOverrides
     {
@@ -738,8 +740,8 @@ namespace dmGameSystem
 
         if (sprite_world->m_Components.Full())
         {
-            ShowFullBufferError("Sprite", "sprite.max_count", sprite_world->m_Components.Capacity());
-            return dmGameObject::CREATE_RESULT_UNKNOWN_ERROR;
+            ShowFullBufferError("Sprite", SPRITE_MAX_COUNT_KEY, sprite_world->m_Components.Capacity());
+            return dmGameObject::CREATE_RESULT_TOO_MANY_COMPONENTS;
         }
         uint32_t index = sprite_world->m_Components.Alloc();
         SpriteComponent* component = &sprite_world->m_Components.Get(index);
@@ -1051,10 +1053,13 @@ namespace dmGameSystem
         xs[0] = ys[0] = 0;
         xs[3] = ys[3] = 1;
 
-        xs[1] = sx * slice9.getX();
-        xs[2] = 1 - sx * slice9.getZ();
-        ys[1] = sy * slice9.getW();
-        ys[2] = 1 - sy * slice9.getY();
+        // Flipping the UV grid also moves the fixed-size slice borders to the
+        // opposite side of the sprite. Keep the geometry subdivisions aligned
+        // with the reversed UV subdivisions for asymmetric slice values.
+        xs[1] = sx * (flip_u ? slice9.getZ() : slice9.getX());
+        xs[2] = 1 - sx * (flip_u ? slice9.getX() : slice9.getZ());
+        ys[1] = sy * (flip_v ? slice9.getY() : slice9.getW());
+        ys[2] = 1 - sy * (flip_v ? slice9.getW() : slice9.getY());
 
         if (has_world_position_attribute)
         {
